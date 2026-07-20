@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../../supabase"
+		},
+		{
+			"path": "../../utils"
+		},
+		{
+			"path": "../../guidelines"
+		},
+		{
+			"path": ".."
+		}
+	]
+}
