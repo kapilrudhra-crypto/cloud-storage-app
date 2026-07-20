@@ -55,6 +55,8 @@ export interface UploadProgress {
 const SCOPES = [
   "https://www.googleapis.com/auth/drive.file",
   "https://www.googleapis.com/auth/drive.metadata.readonly",
+  "https://www.googleapis.com/auth/userinfo.email",
+"https://www.googleapis.com/auth/userinfo.profile",
 ].join(" ");
 
 const API = "https://www.googleapis.com/drive/v3";
@@ -80,11 +82,18 @@ async function fetchUserInfo(accessToken: string): Promise<{ email: string; name
   const r = await fetch("https://www.googleapis.com/oauth2/v2/userinfo", {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
-  if (!r.ok) throw new Error("Failed to get user info");
-  const d = await r.json();
-  return { email: d.email, name: d.name ?? d.email };
-}
 
+  const text = await r.text();
+  console.log("Google UserInfo Response:", text);
+
+  if (!r.ok) throw new Error(text);
+
+  const d = JSON.parse(text);
+  return {
+    email: d.email,
+    name: d.name ?? d.email,
+  };
+}
 // Request a fresh OAuth access token from the user's browser
 export function requestDriveToken(clientId: string): Promise<{ token: string; email: string; name: string }> {
   return loadGIS().then(
