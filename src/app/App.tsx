@@ -102,6 +102,13 @@ const DRIVE_CLIENT_KEY = "jeeprepro_drive_client_id";
 function loadDriveClientId() { return localStorage.getItem(DRIVE_CLIENT_KEY) ?? ""; }
 function saveDriveClientId(id: string) { localStorage.setItem(DRIVE_CLIENT_KEY, id); }
 
+// ─── Drive Folder Names (virtual G.Drive categories) ─────────────────────────
+const DRIVE_FOLDERS_KEY = "jee_drive_folders";
+function loadDriveFolderNames(): string[] {
+  try { return JSON.parse(localStorage.getItem(DRIVE_FOLDERS_KEY) || '["General"]'); } catch { return ["General"]; }
+}
+function saveDriveFolderNames(f: string[]) { localStorage.setItem(DRIVE_FOLDERS_KEY, JSON.stringify(f)); }
+
 
 // ─── Daily Tasks ──────────────────────────────────────────────────────────────
 const TASKS_KEY = "jeeprepro_tasks";
@@ -911,7 +918,20 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const [refreshing, setRefreshing] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
-  const [showSubjectModal, setShowSubjectModal] = useState(false);
+
+  // ── Upload destination modal ──
+  type UploadDest = "closed" | "destination" | "supabase" | "drive" | "drive-form";
+  const [uploadDest, setUploadDest] = useState<UploadDest>("closed");
+  const [uploadDriveFolder, setUploadDriveFolder] = useState("General");
+  const [uploadDriveUrl, setUploadDriveUrl] = useState("");
+  const [uploadDriveName, setUploadDriveName] = useState("");
+  const [newDriveFolderInput, setNewDriveFolderInput] = useState("");
+  const [showNewDriveInput, setShowNewDriveInput] = useState(false);
+  const [driveLinkSaving, setDriveLinkSaving] = useState(false);
+
+  // ── Drive virtual folders ──
+  const [driveFolderNames, setDriveFolderNames] = useState<string[]>(loadDriveFolderNames);
+  const [openDriveFolder, setOpenDriveFolder] = useState<string | null>(null);
 
   // Google Drive
   const [driveClientId, setDriveClientId] = useState(loadDriveClientId);
@@ -1109,9 +1129,42 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     if (!rawList || rawList.length === 0) return;
     if (!isAuthor) { addToast("Only the manager can upload files", "error"); return; }
     setPendingFiles(Array.from(rawList));
-    setShowSubjectModal(true);
+    setUploadDest("destination");
   };
-  const confirmSubjectUpload = (folder: string) => { setShowSubjectModal(false); doUpload(pendingFiles, folder); };
+  const closeUploadModal = () => {
+    setUploadDest("closed"); setPendingFiles([]);
+    setUploadDriveUrl(""); setUploadDriveName("");
+    setNewDriveFolderInput(""); setShowNewDriveInput(false);
+  };
+  const confirmSubjectUpload = (folder: string) => { closeUploadModal(); doUpload(pendingFiles, folder); };
+  const addDriveFolderName = () => {
+    const name = newDriveFolderInput.trim();
+    if (!name) return;
+    const updated = [...new Set([...driveFolderNames, name])];
+    setDriveFolderNames(updated); saveDriveFolderNames(updated);
+    setNewDriveFolderInput(""); setShowNewDriveInput(false);
+  };
+  const saveDriveLink = async () => {
+    if (!uploadDriveUrl.trim()) return;
+    setDriveLinkSaving(true);
+    try {
+      const meta: StoredFile = {
+        id: crypto.randomUUID(),
+        name: uploadDriveName.trim() || uploadDriveUrl.trim(),
+        type: "other", size: 0,
+        subject: "GDrive", folder: uploadDriveFolder,
+        uploadedAt: new Date().toISOString(),
+        trashed: false, starred: false,
+        mimeType: "gdrive",
+        externalUrl: uploadDriveUrl.trim(),
+      };
+      await dbSaveDriveLink(meta);
+      setFiles((p) => [meta, ...p]);
+      closeUploadModal();
+      addToast(`Link saved in "${uploadDriveFolder}"!`, "success");
+    } catch { addToast("Save nahi hua", "error"); }
+    finally { setDriveLinkSaving(false); }
+  };
 
   const handleTrash = async (id: string) => {
     if (!isAuthor) return;
@@ -1181,32 +1234,13 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
   const todayTasks = tasks.filter((t) => t.date === "today");
   const tomorrowTasks = tasks.filter((t) => t.date === "tomorrow");
 
-  // Google Drive links — backed by Supabase (files table, mimeType=gdrive, folder=GDrive)
+  // Google Drive links — backed by Supabase (files table, mimeType=gdrive)
   const gdriveLinks = useMemo(() => files.filter((f) => f.mimeType === "gdrive" && !f.trashed), [files]);
-  const [newLinkUrl, setNewLinkUrl] = useState("");
-  const [newLinkTitle, setNewLinkTitle] = useState("");
-  const [linkSaving, setLinkSaving] = useState(false);
-  const addGDriveLink = async () => {
-    if (!newLinkUrl.trim()) return;
-    setLinkSaving(true);
-    try {
-      const meta: StoredFile = {
-        id: crypto.randomUUID(),
-        name: newLinkTitle.trim() || newLinkUrl.trim(),
-        type: "other", size: 0,
-        subject: "GDrive", folder: "GDrive",
-        uploadedAt: new Date().toISOString(),
-        trashed: false, starred: false,
-        mimeType: "gdrive",
-        externalUrl: newLinkUrl.trim(),
-      };
-      await dbSaveDriveLink(meta);
-      setFiles((p) => [meta, ...p]);
-      setNewLinkUrl(""); setNewLinkTitle("");
-      addToast("Link saved!", "success");
-    } catch { addToast("Link save nahi hua", "error"); }
-    finally { setLinkSaving(false); }
-  };
+  // All unique drive folder names (from saved + from existing files)
+  const allDriveFolderNames = useMemo(() => {
+    const fromFiles = gdriveLinks.map((f) => f.folder).filter(Boolean);
+    return [...new Set([...driveFolderNames, ...fromFiles])];
+  }, [driveFolderNames, gdriveLinks]);
   // Mobile full nav drawer
   const [showMobileMenu, setShowMobileMenu] = useState(false);
 
@@ -1219,9 +1253,9 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
     { icon: Cloud, label: "Cloud Storage", id: "storage" as Page },
     { icon: ListTodo, label: "My Tasks", id: "tasks" as Page },
     { icon: MessageSquare, label: "Reviews", id: "reviews" as Page },
-    { icon: Trash2, label: "Trash", id: "trash" as Page, badge: isAuthor ? (trashedFiles.length || undefined) : undefined },
+    ...(isAuthor ? [{ icon: Trash2, label: "Trash", id: "trash" as Page, badge: trashedFiles.length || undefined }] : []),
     { icon: Settings, label: "Settings", id: "settings" as Page },
-  ];
+  ] as { icon: any; label: string; id: Page; badge?: number }[];
   // Bottom nav items for mobile — last item opens full menu drawer
   const mobileNavItems = [
     { icon: LayoutDashboard, label: "Home", id: "dashboard" as Page },
@@ -1464,7 +1498,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
               {isAuthor && (openSubFolder || (openSubject && openSubject !== "Chemistry")) && (
                 <>
                   <input type="file" multiple className="hidden" id="subj-upload"
-                    onChange={(e) => { doUpload(Array.from(e.target.files ?? []), openSubFolder ?? openSubject ?? "Other"); (e.target as HTMLInputElement).value = ""; }} />
+                    onChange={(e) => { handleStorageUpload(e.target.files); (e.target as HTMLInputElement).value = ""; }} />
                   <label htmlFor="subj-upload" className="flex items-center gap-2 px-4 py-2 bg-primary text-white text-sm font-medium rounded-lg hover:bg-primary/90 cursor-pointer">
                     <Upload className="w-3.5 h-3.5" /> Upload
                   </label>
@@ -1516,7 +1550,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
                 const folder = openSubFolder ?? openSubject!;
                 return (
                   <div className="space-y-4">
-                    {isAuthor && <DropZone onFiles={(fl) => doUpload(Array.from(fl), folder)} uploading={uploading} />}
+                    {isAuthor && <DropZone onFiles={(fl) => handleStorageUpload(fl)} uploading={uploading} />}
                     <FileListTable files={filesInFolder(folder)} onDownload={handleDownload} onDelete={handleTrash} isAuthor={isAuthor} label="No files in this folder yet" />
                   </div>
                 );
@@ -1536,7 +1570,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
               {isAuthor && (
                 <>
                   <input type="file" multiple className="hidden" id="mock-upload"
-                    onChange={(e) => { doUpload(Array.from(e.target.files ?? []), "MockTests"); (e.target as HTMLInputElement).value = ""; }} />
+                    onChange={(e) => { handleStorageUpload(e.target.files); (e.target as HTMLInputElement).value = ""; }} />
                   <label htmlFor="mock-upload" className="flex items-center gap-2 px-4 py-2 bg-primary text-white text-sm font-medium rounded-lg hover:bg-primary/90 cursor-pointer">
                     <Upload className="w-3.5 h-3.5" /> Upload Test
                   </label>
@@ -1550,7 +1584,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
                   <p className="text-xs text-muted-foreground">You can <strong className="text-foreground">view and download</strong> tests. Only the manager can upload.</p>
                 </div>
               )}
-              {isAuthor && <DropZone onFiles={(fl) => doUpload(Array.from(fl), "MockTests")} uploading={uploading} />}
+              {isAuthor && <DropZone onFiles={(fl) => handleStorageUpload(fl)} uploading={uploading} />}
               <FileListTable files={mockTestFiles} onDownload={handleDownload} onDelete={handleTrash} isAuthor={isAuthor} label="No mock tests uploaded yet" />
             </div>
           </>
@@ -1567,7 +1601,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
               {isAuthor && (
                 <>
                   <input type="file" multiple className="hidden" id="books-upload"
-                    onChange={(e) => { doUpload(Array.from(e.target.files ?? []), "Books"); (e.target as HTMLInputElement).value = ""; }} />
+                    onChange={(e) => { handleStorageUpload(e.target.files); (e.target as HTMLInputElement).value = ""; }} />
                   <label htmlFor="books-upload" className="flex items-center gap-2 px-4 py-2 bg-primary text-white text-sm font-medium rounded-lg hover:bg-primary/90 cursor-pointer">
                     <Upload className="w-3.5 h-3.5" /> Add Book
                   </label>
@@ -1591,7 +1625,7 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
                 )}
               </div>
 
-              {isAuthor && <DropZone onFiles={(fl) => doUpload(Array.from(fl), "Books")} uploading={uploading} />}
+              {isAuthor && <DropZone onFiles={(fl) => handleStorageUpload(fl)} uploading={uploading} />}
 
               {bookFiles.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-3">
@@ -1940,83 +1974,142 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
           </>
         )}
 
-        {/* ══ GOOGLE DRIVE BOOKS ══ */}
+        {/* ══ GOOGLE DRIVE ══ */}
         {page === "gdrive" && (
           <>
             <header className="px-4 md:px-8 py-3 md:py-4 border-b flex items-center gap-3 md:gap-4 flex-shrink-0" style={{ borderColor: "var(--border)" }}>
-              <div className="flex-1">
-                <h1 className="text-xl font-semibold text-foreground leading-none" style={{ fontFamily: "'Outfit',sans-serif" }}>Google Drive Books</h1>
-                <p className="text-xs text-muted-foreground mt-1">{gdriveLinks.length} link{gdriveLinks.length !== 1 ? "s" : ""} saved · click to open</p>
-              </div>
-            </header>
-            <div className="flex-1 overflow-y-auto pb-20 md:pb-0 px-4 md:px-8 py-5 space-y-5">
-              {/* Add link form — only for author */}
-              {isAuthor && (
-                <div className="rounded-xl border p-4 space-y-3" style={{ background: "var(--card)", borderColor: "var(--border)" }}>
-                  <div className="flex items-center gap-2">
-                    <div className="w-6 h-6 rounded-lg flex items-center justify-center flex-shrink-0"
-                      style={{ background: "linear-gradient(135deg,#4285f4,#0f9d58)" }}>
-                      <Globe className="w-3.5 h-3.5 text-white" />
-                    </div>
-                    <p className="text-sm font-semibold text-foreground" style={{ fontFamily: "'Outfit',sans-serif" }}>Google Drive link add karo</p>
-                  </div>
-                  <input value={newLinkTitle} onChange={(e) => setNewLinkTitle(e.target.value)}
-                    placeholder="Book ka naam (e.g. HC Verma Part 1)"
-                    className="w-full px-4 py-2.5 rounded-xl border text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 transition-all"
-                    style={{ background: "var(--secondary)", borderColor: "var(--border)" }} />
-                  <div className="flex gap-2">
-                    <input value={newLinkUrl} onChange={(e) => setNewLinkUrl(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && addGDriveLink()}
-                      placeholder="https://drive.google.com/file/d/... ya koi bhi link"
-                      className="flex-1 px-4 py-2.5 rounded-xl border text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 transition-all"
-                      style={{ background: "var(--secondary)", borderColor: "var(--border)" }} />
-                    <button onClick={addGDriveLink} disabled={linkSaving || !newLinkUrl.trim()}
-                      className="px-5 py-2.5 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition-colors flex items-center gap-1.5 flex-shrink-0">
-                      {linkSaving ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Plus className="w-4 h-4" />}
-                      Save
-                    </button>
-                  </div>
-                </div>
+              {openDriveFolder && (
+                <button onClick={() => setOpenDriveFolder(null)}
+                  className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors">
+                  <ChevronLeft className="w-4 h-4" />
+                </button>
               )}
+              <div className="flex-1">
+                <h1 className="text-xl font-semibold text-foreground leading-none" style={{ fontFamily: "'Outfit',sans-serif" }}>
+                  {openDriveFolder ? openDriveFolder : "Google Drive"}
+                </h1>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {openDriveFolder
+                    ? `${gdriveLinks.filter(f => f.folder === openDriveFolder).length} links`
+                    : `${allDriveFolderNames.length} folder${allDriveFolderNames.length !== 1 ? "s" : ""} · ${gdriveLinks.length} total links`}
+                </p>
+              </div>
+              {isAuthor && !openDriveFolder && (
+                <button onClick={() => { setPendingFiles([]); setUploadDest("drive"); }}
+                  className="flex items-center gap-2 px-4 py-2 bg-primary text-white text-sm font-medium rounded-xl hover:bg-primary/90 transition-colors">
+                  <Plus className="w-3.5 h-3.5" /> Add Link
+                </button>
+              )}
+            </header>
 
-              {gdriveLinks.length === 0 ? (
-                <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-3">
-                  <Globe className="w-12 h-12 opacity-20" />
-                  <p className="text-sm font-medium">Koi Google Drive link nahi</p>
-                  {isAuthor && <p className="text-xs opacity-60">Upar link paste karo</p>}
-                  {!isAuthor && <p className="text-xs opacity-60">Admin ne abhi koi link nahi add kiya</p>}
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {gdriveLinks.map((link) => (
-                    <div key={link.id} className="group relative rounded-xl border p-4 flex flex-col gap-3 hover:border-primary/40 transition-all"
-                      style={{ background: "var(--card)", borderColor: "var(--border)" }}>
+            <div className="flex-1 overflow-y-auto pb-20 md:pb-0 px-4 md:px-8 py-5 space-y-4">
+              {/* Folder list view */}
+              {!openDriveFolder && (
+                <>
+                  {allDriveFolderNames.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-3">
+                      <Globe className="w-12 h-12 opacity-20" />
+                      <p className="text-sm font-medium">Koi Drive folder nahi</p>
+                      {isAuthor && <p className="text-xs opacity-60">Upload ke waqt Drive folder banao</p>}
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                      {allDriveFolderNames.map((folderName) => {
+                        const count = gdriveLinks.filter((f) => f.folder === folderName).length;
+                        return (
+                          <button key={folderName} onClick={() => setOpenDriveFolder(folderName)}
+                            className="group flex items-center gap-4 p-4 rounded-2xl border hover:border-sky-400/40 hover:bg-sky-400/5 text-left transition-all"
+                            style={{ background: "var(--card)", borderColor: "var(--border)" }}>
+                            <div className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0"
+                              style={{ background: "linear-gradient(135deg,rgba(66,133,244,0.15),rgba(15,157,88,0.1))", border: "1px solid rgba(66,133,244,0.2)" }}>
+                              <Globe className="w-6 h-6 text-sky-400" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-sm font-semibold text-foreground">{folderName}</p>
+                              <p className="text-xs text-muted-foreground mt-0.5">{count} link{count !== 1 ? "s" : ""}</p>
+                            </div>
+                            <ChevronRight className="w-4 h-4 text-muted-foreground opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
+                          </button>
+                        );
+                      })}
+                      {/* Create new folder button (author only) */}
                       {isAuthor && (
-                        <button onClick={() => handleTrash(link.id)}
-                          className="absolute top-2.5 right-2.5 p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all">
-                          <X className="w-3.5 h-3.5" />
+                        <button onClick={() => { setPendingFiles([]); setUploadDest("drive"); }}
+                          className="flex items-center gap-4 p-4 rounded-2xl border-2 border-dashed hover:border-primary/40 hover:bg-primary/5 text-left transition-all"
+                          style={{ borderColor: "var(--border)" }}>
+                          <div className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0 bg-primary/10">
+                            <Plus className="w-6 h-6 text-primary" />
+                          </div>
+                          <div>
+                            <p className="text-sm font-semibold text-foreground">New Folder</p>
+                            <p className="text-xs text-muted-foreground mt-0.5">Naya Drive folder banao</p>
+                          </div>
                         </button>
                       )}
-                      <div className="flex items-start gap-3 pr-6">
-                        <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
-                          style={{ background: "linear-gradient(135deg,#4285f4 0%,#0f9d58 100%)" }}>
-                          <Globe className="w-5 h-5 text-white" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-semibold text-foreground leading-snug line-clamp-2">{link.name}</p>
-                          <p className="text-[10px] text-muted-foreground mt-1 truncate">{link.externalUrl}</p>
-                          <p className="text-[10px] text-muted-foreground/60 mt-0.5">{fmtDate(link.uploadedAt)}</p>
-                        </div>
-                      </div>
-                      <a href={link.externalUrl} target="_blank" rel="noopener noreferrer"
-                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border text-xs font-semibold text-primary hover:bg-primary/10 transition-colors"
-                        style={{ borderColor: "var(--border)" }}>
-                        <ExternalLink className="w-3.5 h-3.5" /> Browser mein kholein
-                      </a>
                     </div>
-                  ))}
-                </div>
+                  )}
+                </>
               )}
+
+              {/* Open folder — show links inside */}
+              {openDriveFolder && (() => {
+                const folderLinks = gdriveLinks.filter((f) => f.folder === openDriveFolder);
+                return (
+                  <div className="space-y-4">
+                    {/* Author: quick add link */}
+                    {isAuthor && (
+                      <button onClick={() => { setUploadDriveFolder(openDriveFolder); setPendingFiles([]); setUploadDest("drive-form"); }}
+                        className="w-full flex items-center gap-3 px-4 py-3 rounded-xl border-2 border-dashed hover:border-primary/40 hover:bg-primary/5 transition-all text-left"
+                        style={{ borderColor: "var(--border)" }}>
+                        <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center flex-shrink-0">
+                          <Plus className="w-4 h-4 text-primary" />
+                        </div>
+                        <div>
+                          <p className="text-sm font-medium text-foreground">Link add karo</p>
+                          <p className="text-xs text-muted-foreground">Google Drive ya koi bhi URL</p>
+                        </div>
+                      </button>
+                    )}
+
+                    {folderLinks.length === 0 ? (
+                      <div className="flex flex-col items-center justify-center py-12 text-muted-foreground gap-3">
+                        <Globe className="w-10 h-10 opacity-20" />
+                        <p className="text-sm">Is folder mein koi link nahi</p>
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {folderLinks.map((link) => (
+                          <div key={link.id} className="group relative rounded-xl border p-4 flex flex-col gap-3 hover:border-sky-400/30 transition-all"
+                            style={{ background: "var(--card)", borderColor: "var(--border)" }}>
+                            {isAuthor && (
+                              <button onClick={() => handleTrash(link.id)}
+                                className="absolute top-2.5 right-2.5 p-1.5 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all">
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            <div className="flex items-start gap-3 pr-7">
+                              <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0"
+                                style={{ background: "linear-gradient(135deg,#4285f4 0%,#0f9d58 100%)" }}>
+                                <Globe className="w-5 h-5 text-white" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-semibold text-foreground leading-snug line-clamp-2">{link.name}</p>
+                                <p className="text-[10px] text-muted-foreground mt-1 truncate">{link.externalUrl}</p>
+                                <p className="text-[10px] text-muted-foreground/60 mt-0.5">{fmtDate(link.uploadedAt)}</p>
+                              </div>
+                            </div>
+                            <a href={link.externalUrl} target="_blank" rel="noopener noreferrer"
+                              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border text-xs font-semibold text-primary hover:bg-primary/10 active:bg-primary/20 transition-colors"
+                              style={{ borderColor: "var(--border)" }}>
+                              <ExternalLink className="w-3.5 h-3.5" /> Browser mein kholein
+                            </a>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           </>
         )}
@@ -2260,20 +2353,150 @@ function MainApp({ session, onLogout }: { session: Session; onLogout: () => void
         )}
       </main>
 
-      {/* Subject picker modal */}
-      {showSubjectModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="w-80 rounded-2xl border shadow-2xl p-6" style={{ background: "var(--card)", borderColor: "var(--border)" }}>
-            <h2 className="text-base font-semibold text-foreground mb-1" style={{ fontFamily: "'Outfit',sans-serif" }}>Choose Folder</h2>
-            <p className="text-xs text-muted-foreground mb-4">{pendingFiles.length} file{pendingFiles.length > 1 ? "s" : ""} — select destination folder</p>
-            <div className="grid grid-cols-2 gap-2 mb-4">
-              {["Physics", "Chemistry", "Mathematics", "MockTests", "Books", "Other"].map((s) => (
-                <button key={s} onClick={() => confirmSubjectUpload(s)}
-                  className="py-2 rounded-lg border text-sm font-medium border-border text-muted-foreground hover:border-primary hover:text-primary hover:bg-primary/10 transition-all">{s}</button>
-              ))}
+      {/* ── Upload Destination Modal ── */}
+      {uploadDest !== "closed" && (
+        <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 backdrop-blur-sm px-4 pb-4 sm:pb-0">
+          <div className="w-full max-w-md rounded-2xl border shadow-2xl overflow-hidden" style={{ background: "var(--card)", borderColor: "var(--border)" }}>
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b" style={{ borderColor: "var(--border)" }}>
+              <div>
+                <h2 className="text-base font-semibold text-foreground" style={{ fontFamily: "'Outfit',sans-serif" }}>
+                  {uploadDest === "destination" && "Kahan store karein?"}
+                  {uploadDest === "supabase" && "Supabase folder chunein"}
+                  {uploadDest === "drive" && "Drive folder chunein"}
+                  {uploadDest === "drive-form" && `Link add karein — "${uploadDriveFolder}"`}
+                </h2>
+                {pendingFiles.length > 0 && (
+                  <p className="text-xs text-muted-foreground mt-0.5">{pendingFiles.length} file{pendingFiles.length > 1 ? "s" : ""} selected</p>
+                )}
+              </div>
+              <button onClick={closeUploadModal} className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-secondary transition-colors">
+                <X className="w-4 h-4" />
+              </button>
             </div>
-            <button onClick={() => { setShowSubjectModal(false); setPendingFiles([]); }}
-              className="w-full py-2 rounded-lg border text-sm text-muted-foreground hover:text-foreground transition-colors" style={{ borderColor: "var(--border)" }}>Cancel</button>
+
+            <div className="p-5">
+              {/* Step 1: Choose destination */}
+              {uploadDest === "destination" && (
+                <div className="grid grid-cols-2 gap-3">
+                  <button onClick={() => setUploadDest("supabase")}
+                    className="flex flex-col items-center gap-3 p-5 rounded-xl border-2 hover:border-primary/60 hover:bg-primary/5 transition-all group" style={{ borderColor: "var(--border)" }}>
+                    <div className="w-12 h-12 rounded-xl flex items-center justify-center" style={{ background: "linear-gradient(135deg,rgba(99,102,241,0.2),rgba(99,102,241,0.05))", border: "1px solid rgba(99,102,241,0.3)" }}>
+                      <Cloud className="w-6 h-6 text-primary" />
+                    </div>
+                    <div className="text-center">
+                      <p className="text-sm font-semibold text-foreground">Supabase</p>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">Direct file upload</p>
+                    </div>
+                  </button>
+                  <button onClick={() => setUploadDest("drive")}
+                    className="flex flex-col items-center gap-3 p-5 rounded-xl border-2 hover:border-sky-500/40 hover:bg-sky-500/5 transition-all group" style={{ borderColor: "var(--border)" }}>
+                    <div className="w-12 h-12 rounded-xl flex items-center justify-center"
+                      style={{ background: "linear-gradient(135deg,rgba(66,133,244,0.15),rgba(15,157,88,0.1))", border: "1px solid rgba(66,133,244,0.3)" }}>
+                      <Globe className="w-6 h-6 text-sky-400" />
+                    </div>
+                    <div className="text-center">
+                      <p className="text-sm font-semibold text-foreground">Google Drive</p>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">Paste external link</p>
+                    </div>
+                  </button>
+                </div>
+              )}
+
+              {/* Step 2a: Supabase folder picker */}
+              {uploadDest === "supabase" && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    {[
+                      { name: "Physics", color: "text-cyan-400", bg: "bg-cyan-400/10", border: "border-cyan-400/20" },
+                      { name: "Chemistry", color: "text-emerald-400", bg: "bg-emerald-400/10", border: "border-emerald-400/20" },
+                      { name: "Mathematics", color: "text-violet-400", bg: "bg-violet-400/10", border: "border-violet-400/20" },
+                      { name: "MockTests", color: "text-amber-400", bg: "bg-amber-400/10", border: "border-amber-400/20" },
+                      { name: "Books", color: "text-rose-400", bg: "bg-rose-400/10", border: "border-rose-400/20" },
+                      { name: "Other", color: "text-slate-400", bg: "bg-slate-400/10", border: "border-slate-400/20" },
+                    ].map(({ name, color, bg, border }) => (
+                      <button key={name} onClick={() => confirmSubjectUpload(name)}
+                        className={`flex items-center gap-2.5 px-4 py-3 rounded-xl border-2 text-left hover:border-primary/40 hover:bg-primary/5 transition-all ${border}`}
+                        style={{ background: "var(--secondary)" }}>
+                        <div className={`w-2 h-2 rounded-full flex-shrink-0 ${color.replace("text-", "bg-")}`} />
+                        <span className={`text-sm font-medium ${color}`}>{name}</span>
+                      </button>
+                    ))}
+                  </div>
+                  <button onClick={() => setUploadDest("destination")} className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-2">← Wapas jao</button>
+                </div>
+              )}
+
+              {/* Step 2b: Drive folder picker */}
+              {uploadDest === "drive" && (
+                <div className="space-y-3">
+                  <div className="grid grid-cols-2 gap-2">
+                    {allDriveFolderNames.map((name) => {
+                      const count = gdriveLinks.filter((f) => f.folder === name).length;
+                      return (
+                        <button key={name} onClick={() => { setUploadDriveFolder(name); setUploadDest("drive-form"); }}
+                          className="flex flex-col items-start gap-1 px-4 py-3 rounded-xl border-2 hover:border-sky-400/40 hover:bg-sky-400/5 transition-all text-left"
+                          style={{ borderColor: "var(--border)", background: "var(--secondary)" }}>
+                          <div className="flex items-center gap-2 w-full">
+                            <Globe className="w-4 h-4 text-sky-400 flex-shrink-0" />
+                            <span className="text-sm font-medium text-foreground truncate">{name}</span>
+                          </div>
+                          <span className="text-[11px] text-muted-foreground">{count} link{count !== 1 ? "s" : ""}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {/* New drive folder */}
+                  {showNewDriveInput ? (
+                    <div className="flex gap-2">
+                      <input value={newDriveFolderInput} onChange={(e) => setNewDriveFolderInput(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && addDriveFolderName()}
+                        placeholder="Folder ka naam likhein…"
+                        autoFocus
+                        className="flex-1 px-3 py-2 rounded-xl border text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+                        style={{ background: "var(--secondary)", borderColor: "var(--border)" }} />
+                      <button onClick={addDriveFolderName} className="px-4 py-2 rounded-xl bg-primary text-white text-sm font-medium hover:bg-primary/90 transition-colors">Add</button>
+                      <button onClick={() => setShowNewDriveInput(false)} className="px-3 py-2 rounded-xl border text-sm text-muted-foreground hover:text-foreground transition-colors" style={{ borderColor: "var(--border)" }}>×</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setShowNewDriveInput(true)}
+                      className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border-2 border-dashed text-sm text-muted-foreground hover:text-primary hover:border-primary/40 transition-all"
+                      style={{ borderColor: "var(--border)" }}>
+                      <Plus className="w-4 h-4" /> Naya Drive Folder banao
+                    </button>
+                  )}
+                  <button onClick={() => setUploadDest("destination")} className="w-full text-xs text-muted-foreground hover:text-foreground transition-colors py-2">← Wapas jao</button>
+                </div>
+              )}
+
+              {/* Step 3: Drive link + name form */}
+              {uploadDest === "drive-form" && (
+                <div className="space-y-3">
+                  <div className="flex items-center gap-2 px-3 py-2 rounded-xl" style={{ background: "var(--secondary)" }}>
+                    <Globe className="w-4 h-4 text-sky-400 flex-shrink-0" />
+                    <span className="text-xs text-muted-foreground">Drive Folder:</span>
+                    <span className="text-xs font-semibold text-foreground">{uploadDriveFolder}</span>
+                  </div>
+                  <input value={uploadDriveName} onChange={(e) => setUploadDriveName(e.target.value)}
+                    placeholder="Book/file ka naam (e.g. HC Verma Part 1)"
+                    className="w-full px-4 py-2.5 rounded-xl border text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 transition-all"
+                    style={{ background: "var(--secondary)", borderColor: "var(--border)" }} />
+                  <input value={uploadDriveUrl} onChange={(e) => setUploadDriveUrl(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && saveDriveLink()}
+                    placeholder="https://drive.google.com/file/d/... ya koi bhi link"
+                    className="w-full px-4 py-2.5 rounded-xl border text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/30 transition-all"
+                    style={{ background: "var(--secondary)", borderColor: "var(--border)" }} />
+                  <div className="flex gap-2">
+                    <button onClick={saveDriveLink} disabled={driveLinkSaving || !uploadDriveUrl.trim()}
+                      className="flex-1 py-2.5 rounded-xl bg-primary text-white text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 transition-colors flex items-center justify-center gap-2">
+                      {driveLinkSaving ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Check className="w-4 h-4" />}
+                      {driveLinkSaving ? "Saving…" : "Save Link"}
+                    </button>
+                    <button onClick={() => setUploadDest("drive")} className="px-4 py-2.5 rounded-xl border text-sm text-muted-foreground hover:text-foreground transition-colors" style={{ borderColor: "var(--border)" }}>← Back</button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       )}
